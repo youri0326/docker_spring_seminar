@@ -1,0 +1,37 @@
+{
+  "family": "task-java-yoshiike-0330",
+  "networkMode": "awsvpc",
+  "executionRoleArn": "arn:aws:iam::527151769671:role/TaskExecutionRole-yoshiike-0330",
+  "containerDefinitions": [
+    {
+      "name": "java",
+      "image": "527151769671.dkr.ecr.ap-northeast-1.amazonaws.com/ecr-java-yoshiike-0330:latest",
+      "memory": 512,
+      "cpu": 256,
+      "essential": true,
+      "portMappings": [
+        {
+           "containerPort": 8080,
+            "protocol": "tcp"
+         }
+      ],
+      "environment": [
+        { "name": "DB_HOST", "value": "<db-yoshiike-0330.cnabwrjqs09i.ap-northeast-1.rds.amazonaws.com" },
+        { "name": "DB_USER", "value": "root" },
+        { "name": "DB_PASS", "value": "root1234" },
+        { "name": "DB_NAME", "value": "seminar_db" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/task-yoshiike-0330",
+          "awslogs-region": "ap-northeast-1",
+          "awslogs-stream-prefix": "java"
+        }
+      }
+    }
+  ],
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024"
+}
