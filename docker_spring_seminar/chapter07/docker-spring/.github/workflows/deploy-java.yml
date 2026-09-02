@@ -1,1 +1,255 @@
 
+name: deploy-java
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "**"
+  workflow_dispatch:
+
+env:
+  # AWSリージョン
+  REGION: "ap-northeast-1"
+
+  # ECR設定
+  ECR_REPO_Java: "ecr-java-<氏名>-<日付>"
+  ECR_REPO_Maven: "ecr-maven-<氏名>-<日付>"
+  ECR_REPO_JDK: "ecr-jdk-<氏名>-<日付>"
+
+  CONTAINER_NAME: "java"
+
+  # ECS Task設定
+  TASK_FAMILY: "task-java-<氏名>-<日付>"
+  CONTAINER_PORT: "8080"
+  TASK_ROLE: "TaskExecutionRole-<氏名>-<日付>"
+
+  # RDSのエンドポイント
+  RDS_ENDPOINT: "<rdsのエンドポイント>"
+
+  # CodeDeploy設定
+  CODEDEPLOY_APP: "cicd-aws-codedeploy-java-<氏名>-<日付>"
+  CODEDEPLOY_GROUP: "cicd-aws-codedeploy-java-group"
+
+  # IAMロールのARN（CloudFormationで作成したもの）
+  AWS_ROLE_ARN: "arn:aws:iam::<ACCOUNT_ID>:role/GitHubActionsRole-<氏名>-<日付>"
+
+jobs:
+
+  deploy:
+
+    runs-on: ubuntu-latest
+    # 【必須】OIDC認証のための権限設定
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+
+
+    # --------------------------------------------------
+    # ① 事前準備
+    # --------------------------------------------------
+    # --------------------------------------------------
+    # ソースコード取得
+    # --------------------------------------------------
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    # --------------------------------------------------
+    # AWS認証 (OIDC方式)
+    # --------------------------------------------------
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v5
+      with:
+        aws-region: ${{ env.REGION }}
+        role-to-assume: ${{ env.AWS_ROLE_ARN }}
+
+    # --------------------------------------------------
+    # AWSアカウントIDの取得と登録
+    # ※ 以降のステップで $ACCOUNT_ID として使い回せます
+    # --------------------------------------------------
+    - name: Set AWS Account ID
+      run: |
+        ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+        echo "ACCOUNT_ID=${ACCOUNT_ID}" >> $GITHUB_ENV        
+
+    # --------------------------------------------------
+    # ② Dockerイメージのビルド
+    # --------------------------------------------------
+    # --------------------------------------------------
+    # ECRログイン
+    # --------------------------------------------------
+    - name: Login to Amazon ECR
+      run: |
+        echo "Logging in to Amazon ECR..."
+
+        aws ecr get-login-password --region ${REGION} | \
+        docker login --username AWS --password-stdin ${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com
+
+        echo "ECR login successful."
+
+    # --------------------------------------------------
+    # Dockerイメージビルド
+    # --------------------------------------------------
+    #docker build --build-arg ACCOUNT_ID=${ACCOUNT_ID} --build-arg REGION=${REGION} --build-arg ECR_REPO_Java_Apache=${ECR_REPO_Java_Apache} -t ${ECR_REPO_Java}:latest ./app
+
+    - name: Build Docker image
+      run: |
+        echo "Building Docker image..."
+
+        docker build \
+          --build-arg ACCOUNT_ID=${ACCOUNT_ID} \
+          --build-arg REGION=${REGION} \
+          --build-arg ECR_REPO_Maven=${ECR_REPO_Maven} \
+          --build-arg ECR_REPO_JDK=${ECR_REPO_JDK} \
+          -t ${ECR_REPO_Java}:latest \
+          ./app
+
+        echo "Docker image build completed."
+        
+
+    # --------------------------------------------------
+    # Dockerイメージタグ付け
+    # --------------------------------------------------
+    - name: Tag Docker image
+      run: |
+        echo "Tagging Docker image for ECR..."
+
+        docker tag ${ECR_REPO_Java}:latest ${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/$ECR_REPO_Java:latest
+
+    # --------------------------------------------------
+    # ECRへPush
+    # --------------------------------------------------
+    - name: Push image to ECR
+      run: |
+        echo "Pushing Docker image to ECR..."
+
+        docker push ${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/$ECR_REPO_Java:latest
+
+        echo "Image push completed."
+
+    # --------------------------------------------------
+    # ③ タスク定義の作成
+    # --------------------------------------------------
+    # --------------------------------------------------
+    # TaskDefinition生成
+    # --------------------------------------------------
+    - name: Generate Task Definition
+      run: |
+        echo "Generating ECS Task Definition..."
+
+        cat <<EOF > taskdef.json
+        {
+          "family": "${TASK_FAMILY}",
+          "networkMode": "awsvpc",
+          "requiresCompatibilities": ["FARGATE"],
+          "cpu": "512",
+          "memory": "1024",
+          "executionRoleArn": "arn:aws:iam::${ACCOUNT_ID}:role/${TASK_ROLE}",
+          "containerDefinitions": [
+            {
+              "name": "${CONTAINER_NAME}",
+              "image": "${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com/${ECR_REPO_Java}:latest",
+              "portMappings": [
+                {
+                  "containerPort": ${CONTAINER_PORT},
+                  "protocol": "tcp"
+                }
+              ],
+              "essential": true,
+              "environment": [
+                { "name": "DB_HOST", "value": "${RDS_ENDPOINT}" },
+                { "name": "DB_USER", "value": "root" },
+                { "name": "DB_PASS", "value": "root1234" },
+                { "name": "DB_NAME", "value": "seminar_db" }
+              ]
+            }
+          ]
+        }
+        EOF
+
+        echo "Task Definition file created."
+
+    # --------------------------------------------------
+    # appspec.yml準備
+    # --------------------------------------------------
+    - name: Prepare appspec.yml
+      run: |
+        echo "Preparing CodeDeploy AppSpec file..."
+
+        ls -l CodeDeploy/
+        pwd
+        cp ./CodeDeploy/appspec.yml .
+        echo "Generated files:"
+        ls -l
+    # --------------------------------------------------
+    # TaskDefinitionのARNの取得
+    # --------------------------------------------------
+    - name: Uploading Task Definition ARN
+      run: |
+
+        TASK_DEF_ARN=$(aws ecs register-task-definition \
+          --cli-input-json file://taskdef.json \
+          --query taskDefinition.taskDefinitionArn \
+          --output text)
+
+        echo ${TASK_DEF_ARN}
+        echo "TASK_DEF_ARN=${TASK_DEF_ARN}" >> $GITHUB_ENV
+    # --------------------------------------------------
+    # TaskDefinition ARNをappspecに反映
+    # --------------------------------------------------
+    - name: Update AppSpec with TaskDefinition
+      run: |
+        echo "Updating Task Definition in AppSpec..."
+
+        sed -i "s|<TASK_DEFINITION>|$TASK_DEF_ARN|g" appspec.yml
+
+    # --------------------------------------------------
+    # ④ CodeDeploy
+    # --------------------------------------------------
+    # --------------------------------------------------
+    # CodeDeployデプロイ開始
+    # --------------------------------------------------
+    - name: Start CodeDeploy deployment
+      run: |
+        echo "Starting CodeDeploy deployment..."
+
+        # appspec.yml を JSON文字列化
+        APPSPEC_CONTENT=$(jq -Rs . appspec.yml)
+
+        # revision.json を作成
+        cat <<EOF > revision.json
+        {
+          "revisionType": "AppSpecContent",
+          "appSpecContent": {
+            "content": $APPSPEC_CONTENT
+          }
+        }
+        EOF
+
+        # deploy
+        DEPLOY_ID=$(aws deploy create-deployment \
+          --application-name $CODEDEPLOY_APP \
+          --deployment-group-name $CODEDEPLOY_GROUP \
+          --deployment-config-name CodeDeployDefault.ECSAllAtOnce \
+          --revision file://revision.json \
+          --region ${REGION} \
+          --query deploymentId \
+          --output text)
+
+        echo "DEPLOY_ID=$DEPLOY_ID" >> $GITHUB_ENV
+        echo "Deployment ID: $DEPLOY_ID"
+
+    # --------------------------------------------------
+    # デプロイ完了待機
+    # --------------------------------------------------
+    - name: Wait for deployment to complete
+      run: |
+        echo "Waiting for CodeDeploy deployment to finish..."
+
+        aws deploy wait deployment-successful \
+          --deployment-id $DEPLOY_ID
+
+        echo "Deployment completed successfully!"
